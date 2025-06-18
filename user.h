@@ -100,6 +100,87 @@ enum
     // IR_KEY_M3 = 0x18,
 };
 
+enum
+{
+    ADC_PIN_NONE = 0x00,
+    ADC_PIN_DETECT_CHARGE,  // 检测充电分压后的电压（1/10分压） P12 AN7
+    ADC_PIN_DETECT_BATTERY, // 检测电池分压后的电压（1/2分压）  P05 AN4
+};
+
+// 定义当前充电的状态
+enum
+{
+    CUR_CHARGE_STATUS_NONE = 0x00, // 未在充电
+    CUR_CHARGE_STATUS_IN_CHARGING, // 正在充电
+    // CUR_CHARGE_STATUS_PRE_CHARGING, // 准备进入充电
+    // CUR_CHARGE_STATUS_TRICKLE_CHARGE_WHEN_BAT_IS_LOW,       // 电池电量低，进行涓流充电
+    // CUR_CHARGE_STATUS_CHARGE_NORMALLY,                      // 电池正常充电
+    // CUR_CHARGE_STATUS_TRICKLE_CHARGE_WHEN_BAT_IS_NEAR_FULL, // 电池快满电，进行涓流充电
+};
+
+// 定义当前控制充电的PWM状态
+enum
+{
+    CUR_CHARGING_PWM_STATUS_NONE = 0x00,
+    CUR_CHARGING_PWM_STATUS_LOW_FEQ,  // pwm 低频率
+    CUR_CHARGING_PWM_STATUS_HIGH_FRQ, // pwm 高频率
+};
+
+/*
+    在充电一端检测到可以给电池充电的电压
+    样机是检测到充电输入端大于4.9V，使能给电池的充电
+
+    adc使用 内部 2.0V作为参考电压
+    单片机检测脚检测到 大于 0.49V （4.9V 经过 1/10分压后）,
+    使能给电池的充电
+
+    对应的ad值 1003.52
+*/
+#define ADC_VAL_ENABLE_IN_CHARGE_END ((u16)1004)
+/*
+    在充电一端检测到 断开给电池充电的电压
+    样机是检测到充电输入端小于4V，断开给电池的充电
+
+    adc使用 内部 2.0V作为参考电压
+    单片机检测脚检测到 小于 0.40V （4.0V 经过 1/10分压后）,
+    断开给电池的充电
+
+    对应的ad值 819.2
+*/
+#define ADC_VAL_DISABLE_IN_CHARGE_END ((u16)819)
+/*
+    电池低电量时，对应的ad值
+    样机是低于 2.85V ，进行涓流充电
+
+    adc使用 内部 2.0V作为参考电压
+    单片机检测脚检测到 小于 1.425V （2.85V 经过 1/2分压后），
+    进行涓流充电
+
+    对应ad值 2918.4
+*/
+#define ADC_VAL_BAT_IS_LOW ((u16)2918)
+/*
+    电池快满电时，对应的ad值
+    样机是大于 3.55V ，进行涓流充电（只测试了一次，认为快满电3.6V前应该进行涓流充电）
+
+    adc使用 内部 2.0V作为参考电压
+    单片机检测脚检测到 大于 1.775 V （3.55 V 经过 1/2分压后），
+    进行涓流充电
+
+    对应ad值 3635.2
+*/
+#define ADC_VAL_BAT_IS_NEAR_FULL ((u16)3635)
+/*
+    充电期间，电池充满电时对应的ad值
+    目前只知道样机充满电后的电池电压约为3.6V
+
+    adc使用 内部 2.0V作为参考电压
+    单片机检测脚检测到 大于 1.8 V （3.6 V 经过 1/2分压后），
+    断开给电池的充电，不使能对应的PWM
+
+    对应的ad值为 3686.4
+*/
+#define ADC_VAL_BAT_IS_FULL ((u16)3686)
 
 // #define IR_RECV_PIN P15D // 红外信号接收引脚
 #define IR_RECV_PIN P13D // 红外信号接收引脚
@@ -107,6 +188,11 @@ enum
 volatile u8 ir_data; // 存放红外接收到的数据
 // volatile u8 ir_type; // 区分不同地址的遥控器
 volatile u16 adc_val; // 存放得到的ad值
+
+// volatile u8 cur_charge_status = CUR_CHARGE_STATUS_NONE;
+volatile u8 cur_charge_status;
+//  static u8 cur_charging_pwm_status = CUR_CHARGING_PWM_STATUS_NONE;
+// u8 cur_charging_pwm_status;
 
 //===============Field Protection Variables===============
 u8 abuf;
@@ -212,13 +298,6 @@ volatile bit_flag flag2;
             flag_is_led_5_enable = 0; \
         } while (0);                  \
     }
-
-enum
-{
-    ADC_PIN_NONE = 0x00,
-    ADC_PIN_DETECT_CHARGE,  // 检测充电分压后的电压（1/10分压） P12 AN7
-    ADC_PIN_DETECT_BATTERY, // 检测电池分压后的电压（1/2分压）  P05 AN4
-};
 
 // enum
 // {

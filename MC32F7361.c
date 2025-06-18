@@ -57,15 +57,54 @@ void IO_Init(void)
     DRVCR = 0x80; // 普通驱动
 }
 
+// 控制充电的PWM
+void timer0_pwm_config(void)
+{
+    // 20KHz，18.15%
+    T0CR = (0x01 << 7) | (0x01 << 6); // 使能定时器，使能PWM，时钟源使用CPU，不分频
+    T0LOAD = 215 - 1;
+    // T0DATA = 39;
+    // T0DATA = 0; // 刚上点，T0DATA默认就是0
+
+    /* 为了不对其他PWM造成影响，这里用或操作 */
+    PWMCR3 |= (0x01 << 2); // P02端口输出
+}
+
+// 将 pwm0 配置为 低频，对应涓流充电的 PWM
+void timer0_pwm_set_low_feq(void)
+{
+    // 20KHz，18.15%
+    T0CR = (0x01 << 7) | (0x01 << 6); // 使能定时器，使能PWM，时钟源使用CPU，不分频
+    T0LOAD = 215 - 1;
+    T0DATA = 39;
+}
+
+// 将 PWM0 配置为 高频，对应正常充电的PWM
+void timer0_pwm_set_high_feq(void)
+{
+    PWMCR1 |= (0x01 << 4); // FTMR 选择 FHOSC
+
+    // 105 KHz，0% (测试时用 非0% 的占空比)
+    T0CR = (0x01 << 7) | (0x01 << 6) | (0x01 << 3) | (0x01 << 0); // 使能定时器，使能PWM, 时钟源选择FTMR，时钟源2分频
+    T0LOAD = 164 - 1;
+    T0DATA = 0;
+    // T0DATA = 50;
+}
+
+// 关闭 PWM0 输出，引脚输出低电平
+void timer0_pwm_disable(void)
+{
+    T0CR &= ~((0x01 << 7) | (0x01 << 6)); // 关闭定时器，关闭PWM
+    P02D = 0;
+}
+
 void timer1_config(void)
 {
     T1CR |= (0x01 << 7) | (0x01 << 1); // 使能定时器，时钟源选择CPU, 4分频
     T1LOAD = 109 - 1;                  // 100us (从sdk复制过来的会有些误差，这里做了补偿)
-    // T1EN = 1;
-    // T1IE = 1;
 }
 
-// 只使用 NPWM2
+// 控制灯光的PWM，只使用 NPWM2
 void timer2_pwm_config(void)
 {
     // T2CR = (0x01 << 7) | (0x01 << 6) | (0x01 << 1) | (0x01 << 0); // 使能定时器，使能PWM, CPU, 8分频
@@ -79,7 +118,7 @@ void timer2_pwm_config(void)
 
 void timer2_pwm_set_feq(void)
 {
-    PWMCR1 = (0x01 << 4); // FTMR 选择 FHOSC
+    PWMCR1 |= (0x01 << 4); // FTMR 选择 FHOSC
 
     T2CR = (0x01 << 7) | (0x01 << 6) | (0x01 << 3); // 使能定时器，使能PWM, 时钟源选择FTMR，时钟源不分频
     T2LOAD = 255 - 1;                               //
@@ -164,8 +203,9 @@ void sys_init(void)
     GIE = 0;
     CLR_RAM();
     IO_Init();
+    timer0_pwm_config();
     timer1_config();
-    timer2_pwm_config();
+    // timer2_pwm_config(); // 控制 主灯 灯光 的pwm
 
     adc_config();
 
@@ -178,9 +218,19 @@ void sys_init(void)
 // 红外按键处理
 void ir_handle(void)
 {
+    static u8 last_ir_data = 0;
+
+    // 如果正在充电，不响应按键，直接退出
+    if (CUR_CHARGE_STATUS_IN_CHARGING == cur_charge_status)
+    {
+        ir_data = 0;
+        flag_is_recved_data = 0;
+        flag_is_recv_ir_repeat_code = 0;
+        return;
+    }
+
     if (flag_is_recved_data || flag_is_recv_ir_repeat_code)
     {
-        static u8 last_ir_data = 0;
 
         /*
             如果有按键长按
@@ -261,18 +311,129 @@ void ir_handle(void)
 // 电池放电控制，实际是控制 主灯光 对应的pwm占空比
 void bat_discharge_handle(void)
 {
-    // 如果时间到来，减少pwm占空比
+}
+
+// void fun(void)
+// {
+//     u16 charging_adc_val;
+//     u16 bat_adc_val;
+//     u32 tmp;
+
+//     // T1DATA = 124286 - (u32)bat_adc_val * 7857 * T1DATA / (164 - 1 ) / 1000;
+
+//     // 如果充电输入电压小于14V:
+//     // 这里得到的是 1000倍的占空比值
+//     tmp = (u32)124286 - (u32)charging_adc_val * 7857 * 2 * 10 / 4096;
+//     T1DATA = T1LOAD * (tmp / 1000) / 100; // 最终的占空比值
+// }
+
+// 充电控制
+void charge_handle(void)
+{
+    // static volatile u8 cur_charge_status = CUR_CHARGE_STATUS_NONE;
+    u16 charging_adc_val;
+    u16 bat_adc_val;
+
+    adc_sel_pin(ADC_PIN_DETECT_CHARGE);
+    charging_adc_val = adc_getval(); // 采集充电输入对应的ad值
+    adc_sel_pin(ADC_PIN_DETECT_BATTERY);
+    bat_adc_val = adc_getval(); // 采集电池电压对应的ad值
+
+    // 如果当前未在充电
+    if (CUR_CHARGE_STATUS_NONE == cur_charge_status)
+    {
+        if (charging_adc_val >= ADC_VAL_ENABLE_IN_CHARGE_END)
+        {
+            // 如果在未充电时，检测到充电输入电压而使能充电
+
+            // 可以先开着 控制充电的PWM，等 单片机在充电时检测到满电再断开PWM
+            // // 如果电池电压 大于 快满电 的电压，不使能充电
+            // if (bat_adc_val >= ADC_VAL_BAT_IS_NEAR_FULL)
+            // {
+            //     return;
+            // }
+
+            cur_charge_status = CUR_CHARGE_STATUS_IN_CHARGING;
+        }
+    }
+    else // 如果当前正在充电
+    {
+        static u8 cur_charging_pwm_status = CUR_CHARGING_PWM_STATUS_NONE;
+
+        // TODO:
+        if (charging_adc_val <= ADC_VAL_DISABLE_IN_CHARGE_END ||
+            charging_adc_val >= 2663 || /* 充电输入电压大于 13V ，断开充电 ，公式还有缺陷*/
+            bat_adc_val >= ADC_VAL_BAT_IS_FULL)
+        {
+            // 充电输入的电压小于一定值，断开充电
+            // 电池 已经满电， 断开充电
+            timer0_pwm_disable();
+            cur_charge_status = CUR_CHARGE_STATUS_NONE;
+            cur_charging_pwm_status = CUR_CHARGING_PWM_STATUS_NONE;
+            return;
+        }
+
+        // 电池电压小于一定值或是大于一定值，进行涓流充电
+        if (bat_adc_val <= ADC_VAL_BAT_IS_LOW ||
+            bat_adc_val >= ADC_VAL_BAT_IS_NEAR_FULL)
+        {
+            if (CUR_CHARGING_PWM_STATUS_LOW_FEQ != cur_charging_pwm_status)
+            {
+                timer0_pwm_set_low_feq(); // 函数内部设定了固定频率和固定占空比
+                cur_charging_pwm_status = CUR_CHARGING_PWM_STATUS_LOW_FEQ;
+            }
+        }
+        else
+        {
+            u32 tmp;
+
+            // 如果电池电压不在涓流充电的区间，则正常充电
+            // 注意这里不能随意改变 PWM占空比，最好设置PWM占空比为0
+            if (CUR_CHARGING_PWM_STATUS_HIGH_FRQ != cur_charging_pwm_status)
+            {
+                timer0_pwm_set_high_feq();
+                cur_charging_pwm_status = CUR_CHARGING_PWM_STATUS_HIGH_FRQ;
+            }
+
+            // 根据充电电压调整pwm占空比
+
+            /*
+                测得样机充电控制的功能：
+                5V输入，pwm 105Khz，90%，（可能要使用 105Khz，85%）；12V输入，pwm 105Khz，30%
+                用（5V，85%）和（12V，30%）这两个点来计算，
+                已知两点坐标(5,85),(12,30)，求对应的方程，
+                对应直线的方程： y  =  −7.857x  + 124.286
+                y 对应占空比，单位：%；x 对应充电输入电压，单位：V
+                在公式上去掉小数点：
+                1000y = -7857x + 124286
+
+                单片机adc使用内部2.0V参考电压，
+                将公式转换成 占空比 和 ad值 的关系:
+                外部充电输入的电压 1/10 分压后，到单片机检测脚
+                外部输入电压 / 10 / 单片机adc参考电压 * 4096 == 单片机采集到的ad值
+                外部输入电压 == 单片机采集到的ad值 / 4096 * 单片机adc参考电压 * 10
+                换算成单片机可以计算的形式：
+                外部输入电压 == 单片机采集到的ad值 * 单片机adc参考电压 * 10 / 4096
+                x = adc_val * 2 * 10 / 4096
+
+                得到的公式：
+                1000y = 124286 - 7857 (adc_val * 2 * 10 / 4096)
+                1000y = 124286 - adc_val * 7857 * 2 * 10 / 4096
+                这个公式运算不会超出 2^32 范围
+            */
+            tmp = (u32)124286 - (u32)charging_adc_val * 7857 * 2 * 10 / 4096;
+            T1DATA = (u32)T1LOAD * (u32)tmp / 1000 / 100; // 最终的占空比值
+        }
+    }
 }
 
 void main(void)
 {
     sys_init();
 
-
-    timer2_pwm_set_feq();
-
     while (1)
     {
+        charge_handle();
     }
 }
 
@@ -477,6 +638,7 @@ void int_isr(void) __interrupt
         // P14D = !P14D;
         T3IF = 0;
     }
+    
     __asm;
     swapar _statusbuf;
     movra _PFLAG;
