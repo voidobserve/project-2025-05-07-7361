@@ -91,15 +91,16 @@ typedef union
 } bit_flag;
 volatile bit_flag flag1;
 volatile bit_flag flag2;
+volatile bit_flag flag3;
 #define flag_is_recved_data flag1.bits.bit0         // 是否收到了红外数据，并且没有做处理
 #define last_level_in_ir_pin flag1.bits.bit1        // 在红外接收对应的中断函数中，表示上次引脚对应的电平
 #define flag_is_recv_ir_repeat_code flag1.bits.bit2 // 是否收到了红外的重复码
 
 #define flag_is_charging_adjust_time_come flag1.bits.bit3       // 调节充电的时间到来
 #define flag_is_in_setting_mode flag1.bits.bit4                 // 是否处于设置模式
-#define flag_is_in_struction_mode flag1.btis.bit5               // 是否处于指示模式
+#define flag_is_in_struction_mode flag1.bits.bit5               // 是否处于指示模式
 #define flag_led_struction_mode_exit_times_come flag1.bits.bit6 // 退出指示灯指示模式的时间到来
-#define flag_is_led_off_enable flag_bits.bit7                   // 标志位，是否要回到 led_off 模式
+#define flag_is_led_off_enable flag1.bits.bit7                  // 标志位，是否要回到 led_off 模式
 
 #define flag_is_led_1_enable flag2.bits.bit0 // led  是否使能，0--不使能，led 熄灭，1--使能，led 点亮
 #define flag_is_led_2_enable flag2.bits.bit1 // led  是否使能，0--不使能，led 熄灭，1--使能，led 点亮
@@ -107,7 +108,18 @@ volatile bit_flag flag2;
 #define flag_is_led_4_enable flag2.bits.bit3 // led  是否使能，0--不使能，led 熄灭，1--使能，led 点亮
 #define flag_is_led_5_enable flag2.bits.bit4 // led  是否使能，0--不使能，led 熄灭，1--使能，led 点亮
 
-#define last_level_in_ir_pin flag2.bits.bit5 // 红外接收脚，上一次检测到的电平，在定时器中断内使用
+#define flag_led_gear_update_times_come flag2.bits.bit5 // 指示灯状态更新的时间到来
+/*
+    是否要在设置模式期间关闭主灯光
+
+    如果已经关灯，在设置模式期间，主灯闪烁完成后，直接关灯
+*/
+#define flag_allow_light_in_setting_mode flag2.bits.bit6
+#define flag_is_adjust_light_slowly flag2.bits.bit7 // 是否要缓慢调节主灯光的占空比
+
+// 是否开启了定时关机功能：
+#define flag_is_auto_shutdown_enable flag3.bits.bit0
+#define flag_is_auto_shutdown_times_come flag3.bits.bit2 // 定时关机的时间到来
 
 #define LED_1_ON()                    \
     {                                 \
@@ -211,6 +223,62 @@ enum
     ADC_REF_2_0_VOL = 0x00, // adc使用2.0V参考电压
     ADC_REF_3_0_VOL,        // adc使用3.0V参考电压
 };
+
+/*
+    3.2V以上，（1）（2）（3）（4）（5）点亮
+    3.05V以上，（1）（2）（3）（4）
+    2.85V以上，（1）（2）（3）
+    2.65V以上，（1）（2）
+    2.65V以下，（1）
+*/
+
+// 指示灯从左往右数,分为1~5
+// 电池电压检测脚检测到的电压,为电池的1/2分压
+// 定义电池各个电压下对应的AD值:
+enum
+{
+    BAT_ADC_VAL_1 = (u16)((u32)2650 * 4096 / 2 / 2 / 1000), /* 2713.6 -- 电池2.65V对应的ad值 */
+    BAT_ADC_VAL_2 = (u16)((u32)2850 * 4096 / 2 / 2 / 1000),
+    BAT_ADC_VAL_3 = (u16)((u32)3050 * 4096 / 2 / 2 / 1000),
+    BAT_ADC_VAL_4 = (u16)((u32)3200 * 4096 / 2 / 2 / 1000),
+
+    BAT_ADC_VAL_5 = (u16)((u32)3400 * 4096 / 2 / 2 / 1000),
+};
+
+// #define BAT_ADC_VAL_DEAD_ZONE (50) // 电池电压对应的ad值死区
+
+enum
+{
+    CUR_LED_MODE_OFF = 0, // 关机，指示灯全灭
+
+    CUR_LED_MODE_BAT_INDICATOR, // 电池电量指示模式
+    CUR_LED_MODE_CHARGING,      // 充电指示模式
+
+    CUR_LED_MODE_SETTING, // 刚用遥控器按下SET按键，未按下其他按键，5个指示灯会一起闪烁（指示灯由定时器控制）
+
+    CUR_LED_MODE_INITIAL_DISCHARGE_GEAR_IN_SETTING_MODE, // 设置模式，子模式 初始放电挡位
+    CUR_LED_MODE_DISCHARGE_RATE_IN_SETTING_MODE,         // 设置模式，子模式 放电速率
+
+    CUR_LED_MODE_IN_INSTRUCTION_MODE, // 指示模式，只用作比较，不用作赋值
+
+    CUR_LED_MODE_BAT_INDICATIOR_IN_INSTRUCTION_MODE,         // 指示模式，子模式 电池电量指示
+    CUR_LED_MODE_INITIAL_DISCHARGE_GEAR_IN_INSTRUCTION_MODE, // 指示模式，子模式 初始放电档位指示
+    CUR_LED_MODE_DISCHARGE_RATE_IN_INSTRUCTION_MODE,         // 指示模式，子模式 放电速率指示
+
+    CUR_LED_MODE_MAX = 0xFF,
+};
+
+void led_init(void);
+void led_all_off(void);
+// 清除led有关的状态
+void led_status_clear(void);
+void led_mode_alter(u8 led_mode);
+void led_handle(void);
+void set_led_mode_status(u8 set_led_mode, u8 val);
+
+void light_init(void);
+void light_blink(u8 blink_cnt);
+void light_handle(void);
 
 extern void delay_ms(u16 xms);
 // 毫秒级延时 (误差：在1%以内，1ms、10ms、100ms延时的误差均小于1%)
